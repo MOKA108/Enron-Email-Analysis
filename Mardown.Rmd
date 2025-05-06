@@ -1,0 +1,710 @@
+---
+title: "Enron Project"
+author: "Marie-Caroline Bertheau"
+date: "2025-05-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(magrittr)
+library(knitr)
+library(kableExtra)
+library(ggrepel)
+library(igraph)
+load("~/.RData")
+```
+
+## R Markdown
+
+# Introduction 
+
+This markdow presents an in-depth analysis of the Enron email dataset, which traces internal communications between 149 of the company's employees between 1999 and 2002. This period, marked by the financial scandal that led to the company's resounding bankruptcy, offers a rich terrain for exploring communication dynamics in times of crisis.
+
+Through this project, we are analyzing the most active employees, examining the roles and status of the various players within the network, and studying the temporal evolution of exchanges in relation to the key public events of the scandal. We also propose an initial approach to analyzing the content of the messages exchanged. 
+
+This work is accompanied by an interactive Shiny application for dynamic visualization and exploration of the results.
+
+# 1. Mail Flow Analysis
+
+## 1.1 Overview
+
+The purpose of this section is to identify the mail flow and the more active people in the Enron's mail flow. 
+
+```{r}
+
+message <- message %>%
+  mutate(date = as.Date(date),
+         month = as.Date(format(date, "%Y-%m-01")))
+
+message_filtered <- message %>%
+  filter(month >= as.Date("1999-01-01") & month <= as.Date("2002-12-31"))
+
+mail_volume <- message_filtered %>%
+  group_by(month) %>%
+  summarise(n_mails = n()) %>%
+  arrange(month)
+
+events <- data.frame(
+  date = as.Date(c("2000-11-01", "2001-04-01", "2001-10-01", "2002-01-01")),
+  label = c("California Crisis", "New CEO", "SEC Investigation", "Enron Bankruptcy"))
+
+ggplot(mail_volume, aes(x = month, y = n_mails)) +
+  geom_line(color = "cyan", linewidth = 1.2) + 
+  geom_point(color = "blue", size = 2) +   
+  geom_vline(data = events, aes(xintercept = date),
+             color = "red2", linetype = "dashed", linewidth = 1.2) +
+  geom_text_repel(data = events,
+                  aes(x = date - 15, y = 0, label = label),
+                  inherit.aes = FALSE,
+                  angle = 90, hjust = 1.2,
+                  direction = "y",
+                  nudge_x = -10,
+                  segment.color = NA,
+                  size = 3.5,
+                  fontface = "italic",
+                  color = "red2") +
+scale_x_date(date_breaks = "3 months", date_labels = "%b %Y",
+    limits = as.Date(c("1999-01-01", "2002-12-31"))) +  # ← ajoute le +
+labs(title = "Number of Emails Sent Per Month",
+     x = "Month", y = "Number of Emails") +
+theme_minimal() +
+theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+Thanks to this plot, we can identify that the mail flow increase each time the company as to faced to a critical event.
+
+## 1.2 Domain distribution 
+Here, we focus on teh repartition of the domain used for emails. 
+
+```{r}
+
+senders <- message %>% filter(!is.na(sender), sender != "") %>% mutate(domain = ifelse(grepl("@enron.com$", sender, ignore.case = TRUE), "Enron", "Extern")) %>% count(domain, name = "nb") %>% mutate(pct = round(100 * nb / sum(nb), 1),label = paste0(pct, "%"))
+
+receivers <- recipientinfo %>% filter(!is.na(rvalue), rvalue != "") %>% mutate(domain = ifelse(grepl("@enron.com$", rvalue, ignore.case = TRUE), "Enron", "Extern")) %>% count(domain, name = "nb") %>% mutate(pct = round(100 * nb / sum(nb), 1),label = paste0(pct, "%"))
+
+colors <- c("Enron" = "darkcyan", "Extern" = "darkgoldenrod1")
+
+
+senders_labels <- paste0(senders$pct)
+receivers_labels <- paste0(receivers$pct)
+
+
+par(mar = c(2, 2, 2, 2))  
+par(mfrow = c(1, 2), oma = c(0, 0, 2, 0))
+par(xpd = TRUE)
+
+#Sendes' Pie
+pie(senders$nb,
+    labels = senders_labels,
+    col = colors[senders$domain])
+mtext("Senders", side = 1, font = 3)  # italique
+
+# Receivers' Pie
+pie(receivers$nb,
+    labels = receivers_labels,
+    col = colors[receivers$domain])
+mtext("Receivers", side = 1, font = 3)  # italique
+
+
+legend("topright",
+       legend = names(colors),
+       fill = colors,
+       title = "Email domains",
+       bty = "n")
+
+
+title(main = "Email Domain Distribution", outer = TRUE, cex.main = 1.6)
+
+```
+We can deduce from these graphs that the majority of emails are exchanged internally, with 81.7% of sends and 87.3% of receives coming from Enron addresses. There is a slight imbalance: Enron sends proportionally more emails to the outside world than it receives. This highlights a communication network very much centered on the company, with limited external exchanges.
+
+## 1.3 Enron's summaries
+### 1.3.1 Internal Enron Activity Statistics
+
+This table provides information on the number of e-mails sent and received by Enron employees, giving the minimum and maximum values for e-mails sent and received. It quantifies the intensity of internal exchanges and identifies the most and least active profiles. 
+
+```{r}
+stats_senders_enron <- message %>%
+  filter(!is.na(sender), grepl("@enron.com$", sender, ignore.case = TRUE)) %>%
+  count(sender, name = "n_mails") %>%
+  summarise(Min = min(n_mails), Max = max(n_mails)) %>%
+  mutate(Type = "Enron's sender")
+
+stats_receivers_enron <- recipientinfo %>%
+  filter(!is.na(rvalue), grepl("@enron.com$", rvalue, ignore.case = TRUE)) %>%
+  count(rvalue, name = "n_mails") %>%
+  summarise(Min = min(n_mails), Max = max(n_mails)) %>%
+  mutate(Type = "Enron's receiver")
+
+resume_enron_df <- bind_rows(stats_senders_enron, stats_receivers_enron) %>%
+  select(Type, Min, Max)
+resume_enron_df %>%
+  kable(format = "html",
+        digits = 2,
+        caption = "<b style='color:black;'>Summary of Internal Enron Email Activity</b>") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = FALSE,
+    font_size = 12,
+    position = "left"
+  ) %>%
+  row_spec(0, bold = TRUE, background = "blue", color = "white")
+  
+```
+We observe that Enron employees send a maximum of 6,273, while they receive an average of 63 emails, with an impressive maximum of 19,198. This shows a marked asymmetry: some recipients receive a huge number of messages, suggesting central or collective roles (e.g. shared boxes). The identical minimum value (1) indicates that some employees have very little involvement in internal exchanges.
+
+
+### 1.3.2 External Activity
+
+The purpose of this table is to summarize particular categories of e-mails, such as external senders or recipients, empty addresses or addresses with no status, by displaying their maximum number. It enables us to detect the share and importance of these atypical cases in the communication network.
+
+```{r}
+nb_na_statut <- employeelist %>% filter(status == "N/A") %>% nrow()
+
+nb_sender_externe <- message %>% filter(!is.na(sender), sender != "", !grepl("@enron.com$", sender, ignore.case = TRUE)) %>% distinct(sender) %>% nrow()
+
+nb_receiver_externe <- recipientinfo %>% filter(!is.na(rvalue), rvalue != "", !grepl("@enron.com$", rvalue, ignore.case = TRUE)) %>% distinct(rvalue) %>% nrow()
+
+
+df_summary <- data.frame(
+  Description = c(
+    "N/A status",
+    "Extern senders",
+    "Extern receivers"),
+  
+  Valeur = c(
+    nb_na_statut,
+    nb_sender_externe,
+    nb_receiver_externe)
+)
+
+df_summary %>%
+  kable(format = "html",
+        align = c("l", "r"),
+        col.names = c("Description", "Valeur"),
+        caption = "<b style='color:black;'>Summary of Sender and Receiver Counts</b>") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = FALSE,
+    font_size = 12,
+    position = "left"
+  ) %>%
+  row_spec(0, bold = TRUE, background = "blue", color = "white")
+```
+
+The table shows that external recipients (39,518) and external senders (11,502) account for a significant proportion of exchanges. The limited number of “NA” statuses (31) suggests an overall well-informed database of internal statuses. These results highlight the importance of external interactions.
+
+# 2. Status VS Mail Flow
+## 2.1 Mail flow by status
+This Graph allows us to identify which position processes the most e-mails (received and sent) out of the entire database.
+
+```{r}
+senders_summary <- message %>% group_by(sender) %>% summarise(n = n()) %>% inner_join(employeelist, by = c("sender" = "Email_id")) %>% filter(!is.na(status)) %>% group_by(status) %>% summarise(n_messages = sum(n)) %>%
+mutate(type = "Sent")
+
+
+receivers_summary <- recipientinfo %>% group_by(rvalue) %>% summarise(n = n()) %>% inner_join(employeelist, by = c("rvalue" = "Email_id")) %>% filter(!is.na(status)) %>% group_by(status) %>% summarise(n_messages = sum(n)) %>% mutate(type = "Received")
+
+
+external_senders <- message %>% filter(!is.na(sender), !grepl("@enron.com$", sender, ignore.case = TRUE)) %>% count(sender) %>% summarise(n_messages = sum(n)) %>% mutate(status = "Externe", type = "Sent")
+
+
+external_receivers <- recipientinfo %>% filter(!is.na(rvalue), !grepl("@enron.com$", rvalue, ignore.case = TRUE)) %>% count(rvalue) %>% summarise(n_messages = sum(n)) %>% mutate(status = "Externe", type = "Received")
+
+
+combined_summary <- bind_rows(senders_summary, receivers_summary, external_senders,external_receivers)
+
+ggplot(combined_summary, aes(x = status, y = n_messages, group = type, color = type)) +
+    geom_line(linewidth = 1.2) +
+    geom_point(size = 2) +
+    scale_color_manual(values = c("Sent" = "#1f78b4", "Received" = "#e31a1c")) +
+    labs(title = "E-Mail Volume by Status",
+        x = "Status", y = "Number of E-mails",
+        color = NULL) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+We can see that the “External” category receives by far the largest volume of emails, well above the other statuses, underlining the importance of external interactions. Sending volumes remain low overall for all categories, especially when compared to receiving volumes, reflecting an imbalance in flows. There are also notable peaks among employees and vice-presidents, suggesting central roles in the internal circulation of information.
+
+## 2.2 Mail flow between status 
+
+Here we generate a bubble chart showing email flows between sender and recipient statuses, using dot size and color to represent volume (logarithmic scale). This makes it possible to visually identify the most intense relationships and pinpoint the pairs of statuses that concentrate exchanges. We use a logarithmic scale and bubbles makes it easier to identify the most intense relationships, while preserving the legibility of weaker flows.
+
+```{r}
+senders_status <- message %>%select(mid, sender) %>% left_join(employeelist %>% select(Email_id, status), by = c("sender" = "Email_id")) %>% mutate(sender_status = case_when(!is.na(status) ~ status, !is.na(sender) & !grepl("@enron.com$", sender, ignore.case = TRUE) ~ "Externe",
+TRUE ~ NA_character_)) %>% select(mid, sender_status)
+
+
+receivers_status <- recipientinfo %>% select(mid, rvalue) %>% left_join(employeelist %>% select(Email_id, status), by = c("rvalue" = "Email_id")) %>% mutate(receiver_status = case_when(!is.na(status) ~ status, !is.na(rvalue) & !grepl("@enron.com$", rvalue, ignore.case = TRUE) ~ "Externe", TRUE ~ NA_character_ )) %>% select(mid, receiver_status)
+
+
+statut_links <- left_join(receivers_status, senders_status, by = "mid") %>% filter(!is.na(sender_status), !is.na(receiver_status))  
+
+
+status_counts <- statut_links %>% count(sender_status, receiver_status, name = "n_mails")
+
+ggplot(status_counts, aes(x = receiver_status, y = sender_status)) +
+    geom_point(aes(size = n_mails, color = n_mails), alpha = 0.8) +
+    geom_text(aes(label = ifelse(n_mails > 1000, n_mails, "")), vjust = -1, size = 3) +
+    scale_size(range = c(2, 15), name = "Number of mails") +
+    scale_color_gradientn(
+        colours = c("#deebf7", "#9ecae1", "#3182bd", "#08306b"),
+        trans = "log10",        
+        name = "Number of mails (log scale)") +
+    labs(title = "Email Flow Between Roles (Log Color Scale)",
+        x = "Recipient Status",
+        y = "Sender Status") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(face = "bold", size = 14))
+
+```
+
+The graph shows a massive flow of emails from the “Externe” to the “In House Lawyer”, revealing a major point of contact between the outside world and the organization. There are also sustained exchanges between employees and managers, confirming the importance of horizontal internal communications.  
+
+
+# 3. Actors
+## 3.1 Top 10 Email Senders
+
+This table presents the 10 most active senders in the Enron network, showing the volume of emails they send. 
+
+```{r}
+top_senders <- message %>%
+  filter(!is.na(sender)) %>%
+  count(sender, sort = TRUE) %>%
+  slice_head(n = 10)
+
+top_senders %>%
+  kable(format = "html",
+        col.names = c("Email Address", "Number of Sent Emails"),
+        caption = "<b style='color:black;'>Top 10 Email Senders</b>") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = FALSE,
+    font_size = 12,
+    position = "left"
+  ) %>%
+  row_spec(0, bold = TRUE, background = "blue", color = "white")
+
+```
+
+This table highlights the main email senders at Enron, led by jeff.dasovich with 6273 emails (Government Realtions Executive), following by j.kaminskiwith 5838 emails (Director for Research departement) and kay.mann with 5100 (Head of Legal Enron department). The presence of generic addresses such as "no.address@enron.com" or "enron.announcements@enron.com" also indicates a high volume of automatic communications. 
+
+## 3.2 Top 10 Email Receivers
+
+This table shows the 10 most frequently e-mailed addresses in the Enron network, counting and sorting recipients. 
+
+```{r}
+top_receivers <- recipientinfo %>%
+  filter(!is.na(rvalue)) %>%
+  count(rvalue, sort = TRUE) %>%
+  slice_head(n = 10)
+
+top_receivers %>%
+  kable(format = "html",
+        col.names = c("Email Address", "Number of Received Emails"),
+        caption = "<b style='color:black;'>Top 10 Email Receivers</b>") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = FALSE,
+    font_size = 12,
+    position = "left"
+  ) %>%
+  row_spec(0, bold = TRUE, background = "blue", color = "white")
+
+
+```
+
+We can conclude that "no.address@enron.com" is the most solicited box, probably for automatic or generic messages. Several top executives, such as "jeff.dasovich@enron.com" (Government Realtions Executive) and "richard.shapiro@enron.com"(Enron's Vice President) are among the most frequent recipients. These results reveal the central figures and reception hotspots within the Enron organization.
+
+## 3.3 Network between actors
+
+The aim of this visualization is to highlight key relationships and the hierarchical structure of exchanges within Enron. By retaining the 30 strongest connections between senders and receivers, and visualizing interactions by group (Leader, Employee, N/A, External). Thanks to the Kamada-Kawai layout, we obtain a more intuitive interface. (https://igraph.org/r/doc/layout_with_kk.html)
+
+```{r}
+
+edges_df <- recipientinfo %>%
+  inner_join(message %>% select(mid, sender), by = "mid") %>%
+  filter(!is.na(sender), !is.na(rvalue)) %>%
+  group_by(sender, rvalue) %>%
+  summarise(weight = n(), .groups = "drop")
+
+
+edges_small <- edges_df %>% arrange(desc(weight)) %>% slice_head(n = 30)
+
+g_small <- graph_from_data_frame(edges_small, directed = TRUE)
+
+#Kamada-Kawai Layout
+layout <- layout_with_kk(g_small)
+layout <- layout * 10
+positions <- data.frame(name = V(g_small)$name,
+                        x = layout[,1],
+                        y = layout[,2])
+
+
+edges_plot <- edges_small %>%
+  left_join(positions, by = c("sender" = "name")) %>%
+  rename(x_start = x, y_start = y) %>%
+  left_join(positions, by = c("rvalue" = "name")) %>%
+  rename(x_end = x, y_end = y)
+
+node_groups <- data.frame(name = unique(c(edges_small$sender, edges_small$rvalue))) %>%
+  left_join(employeelist %>% select(Email_id, status), by = c("name" = "Email_id")) %>%
+  mutate(group = case_when(
+    status %in% c("CEO", "Director", "Managing Director", "President", "Manager", "Vice President") ~ "Leader",
+    status %in% c("employee", "In House Lawyer", "Trader") ~ "Employee",
+    is.na(status) & grepl("@enron.com$", name, ignore.case = TRUE) ~ "N/A",
+    TRUE ~ "Externe"
+  ))
+
+
+node_groups$name <- tolower(node_groups$name)
+positions$name <- tolower(positions$name)
+positions <- positions %>%
+  left_join(node_groups %>% select(name, group), by = "name")
+positions$name_short <- sub("@.*", "", positions$name)
+
+
+group_colors <- c("Leader" = "#1f77b4", "Employee" = "#2ca02c",
+                  "N/A" = "#ff7f0e", "Externe" = "#d62728")
+
+
+ggplot() +
+  geom_segment(data = edges_plot,
+               aes(x = x_start, y = y_start, xend = x_end, yend = y_end),
+               alpha = 0.2, color = "grey") +
+  geom_point(data = positions,
+             aes(x = x, y = y, color = group),
+             size = 5) +
+  geom_text(data = positions,
+            aes(x = x, y = y, label = name_short),
+            size = 3, hjust = -0.1, vjust = -0.1) +
+  scale_color_manual(values = group_colors) +
+  theme_void() +
+  ggtitle("Email Network Grouped by Category") +
+  guides(color = guide_legend(title = "Group")) +
+  theme(legend.position = "bottom")
+
+```
+
+The graph highlights several distinct sub-networks, with central figures such as pete.davis, jeff.dasovich and j.kaminski playing a key role in exchanges. External (red) and non-status (orange) nodes appear well connected to influential players, showing significant internal-external interactions. The fragmented structure and groupings suggest an organization in poles or teams, rather than a single centralized network.
+
+# 4.Temporal evolution of the mail flow
+
+This code traces the monthly evolution of e-mails sent and received by different groups (leaders, employees, external parties, etc.) over the period 1999-2002, highlighting the critical period of Q4 2001. It incorporates major events such as the California crisis, the change of CEO, the start of the SEC investigation and the Enron bankruptcy. This makes it possible to link business variations to external events. 
+
+```{r}
+invisible(Sys.setlocale("LC_TIME", "C"))
+
+leaders <- employeelist %>% filter(status %in% c("CEO", "Director", "Managing Director", "President", "manager", "Vice President")) %>%  pull(Email_id)
+
+employees <- employeelist %>%  filter(status %in% c("employee", "In House Lawyer", "Trader")) %>%  pull(Email_id)
+
+na_status <- employeelist %>%  filter(status == "N/A") %>%  pull(Email_id)
+
+sent_data <- message %>% filter(!is.na(date)) %>% mutate( group = case_when(
+sender %in% leaders ~ "Leader",
+sender %in% employees ~ "Employees",
+sender %in% na_status ~ "N/A Enron status",
+!grepl("@enron.com$", sender, ignore.case = TRUE) ~ "Extern",
+TRUE ~ NA_character_),date = as.Date(date),month_date = as.Date(format(date, "%Y-%m-01")),type = "Sent") %>% filter(!is.na(group)) %>% group_by(month_date, group, type) %>% summarise(count = n(), .groups = "drop")
+
+received_data <- recipientinfo %>% left_join(message %>% select(mid, date), by = "mid") %>% filter(!is.na(date)) %>% mutate(group = case_when(
+rvalue %in% leaders ~ "Leader",
+rvalue %in% employees ~ "Employees",
+rvalue %in% na_status ~ "N/A Enron status",
+!grepl("@enron.com$", rvalue, ignore.case = TRUE) ~ "Extern",
+TRUE ~ NA_character_),date = as.Date(date),month_date = as.Date(format(date, "%Y-%m-01")),type = "Received") %>% filter(!is.na(group)) %>% group_by(month_date, group, type) %>% summarise(count = n(), .groups = "drop")
+
+combined_activity <- bind_rows(sent_data, received_data) %>%  filter(month_date >= as.Date("1999-01-01") & month_date <= as.Date("2002-12-31")) %>% mutate(group = factor(group, levels = c("Leader", "Employees", "N/A Enron status", "Extern")))
+
+
+events <- data.frame(
+  date = as.Date(c("2000-11-01", "2001-04-01", "2001-10-01", "2002-01-01")),
+  label = c("California Crisis", "New CEO", "SEC Investigation", "Enron Bankruptcy")
+)
+
+
+highlight_start <- as.Date("2001-10-01")
+highlight_end   <- as.Date("2002-01-01")
+
+
+ggplot(combined_activity, aes(x = month_date, y = count, color = type)) +
+  annotate("rect", xmin = highlight_start, xmax = highlight_end,
+           ymin = 0, ymax = Inf, fill = "#66b2ff", alpha = 0.25) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.2) +
+  geom_vline(data = events, aes(xintercept = date),
+             color = "yellow", linetype = "dashed", linewidth = 1.2) +
+  geom_text_repel(data = events,
+                  aes(x = date, y = 18000, label = label),
+                  inherit.aes = FALSE,
+                  angle = 90, hjust = 1.2,
+                  direction = "y",
+                  nudge_x = -10,
+                  segment.color = NA,
+                  size = 3.5,
+                  fontface = "italic",
+                  color = "black") +
+  facet_wrap(~ group, scales = "fixed", ncol = 1) +
+  scale_color_manual(values = c("Sent" = "#2c7fb8", "Received" = "#f03b20")) +
+  scale_x_date(date_labels = "%b %Y",
+    date_breaks = "3 months"
+  ) +
+  labs(title = "Evolution of Emails Sent and Received by Group",
+    subtitle = "The collapse period (Q4 2001)",
+    x = "Month", y = "Number of Emails", color = NULL
+  ) +
+  theme_minimal() + theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold", size = 12),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 1.5),
+    legend.position = "bottom"
+  )
+
+```
+
+There were clear peaks in activity, particularly among external and leading companies, around major events such as the California crisis, the SEC investigation and the Enron bankruptcy. There was a clear drop in email volume after Q4 2001, a critical period marked in blue, reflecting the gradual collapse of communications as employees were gradually laid off. Internal employees and groups show more stable activity, while external ones react strongly to crises, confirming their sensitivity to external events.
+
+# 5  Content Analysis 
+## 5.1 Top Tension-Related Subject Keywords
+This code extracts the 150 words most frequently mentioned in email subject lines. It highlights the critical themes that frequently recurred in internal exchanges, reflecting commercial and legal tensions. 
+
+```{r}
+clean_words <- message %>%                     
+  filter(!is.na(subject)) %>%
+  pull(subject) %>%
+  tolower() %>%
+  gsub("[^a-z\\s]", " ", .) %>%
+  strsplit("\\s+") %>%
+  unlist() %>%
+  .[nchar(.) > 3]
+
+
+TOP150_content <- as.data.frame(table(clean_words)) %>%
+  arrange(desc(Freq)) %>%
+  slice_head(n = 150) %>%
+  rename(word = clean_words) %>%
+  mutate(rank = row_number())
+
+
+tension_subjectskeywords <- c("credit", "california", "trading", "deal", "market", "isda", "ferc", "contract", "notification", "legal", "risk", "	
+announcement", "committee", "financial", "expense", "important", "urgent", "board")
+
+
+tension_subject_df <- TOP150_content %>%
+  filter(word %in% tension_subjectskeywords) %>%
+  arrange(rank)
+
+
+tension_subject_df %>%
+  kable("html",
+        caption = "<b style='color:black;'>Top Tension-Related Keywords in Email Subjects</b>",
+        col.names = c("Word", "Frequency", "Rank")) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = FALSE,
+    font_size = 12,
+    position = "left"
+  ) %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "blue")
+
+```
+
+The most frequent keywords in email subject lines (such as “credit”, “california”, “trading” and “deal”) reveal major financial and operational concerns within Enron. The strong presence of terms such as “legal”, “risk” and “contract” indicates intense activity linked to regulatory and legal issues. These results underline the company's stressed environment, marked by both internal and external critical issues.
+
+
+## 5.2 Top Tension-Related Content Keywords
+
+This code extracts the 150 words most frequently mentioned in the email content. It highlights the critical themes that frequently recurred in internal exchanges, reflecting commercial and legal tensions. 
+
+```{r}
+clean_words <- referenceinfo %>% filter(!is.na(reference)) %>%pull(reference) %>%tolower() %>%              gsub("[^a-z\\s]", " ", .) %>%strsplit("\\s+") %>% unlist() %>%.[nchar(.) > 3]   
+
+TOP150_content <- as.data.frame(table(clean_words)) %>% arrange(desc(Freq)) %>% slice_head(n = 150) %>% rename(word = clean_words) %>% mutate(rank = row_number())
+
+
+tension_contentkeywords <- c("contract", "agreement", "market", "price", "energy","california","credit", "confidential", "trading", "group", "issues", "power", "call", "meeting","houston", "questions", "review", "legal", "help")
+
+tension_content_df <- TOP150_content %>% filter(word %in% tension_contentkeywords) %>% arrange(rank)
+
+tension_content_df %>%
+  kable("html",
+        caption = "<b style='color:black;'>Top Tension-Related Keywords in Email Content</b>",
+        col.names = c("Word", "Frequency", "Rank")) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = FALSE,
+    font_size = 12,
+    position = "left"
+  ) %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "blue")
+
+```
+
+The most frequent keywords in email subject lines (such as “energy”, “california”, “trading” and “contract”) confirms the major financial and operational concerns within Enron. The strong presence of terms such as “legal”, “help” and “agreement” also confirms intense activity linked to regulatory and legal issues. These results confirms the company's stressed environment, marked by both internal and external critical issues.
+
+
+## 5.3  Monthly Trend of Subjects Keywords
+
+This code tracks the monthly use of sensitive keywords in email subject lines.  It incorporates key events (California crisis, new CEO, SEC investigation, bankruptcy) to contextualize the variations observed. 
+
+```{r}
+
+subject_time <- message %>%
+  filter(!is.na(subject), !is.na(date)) %>%
+  mutate(
+    date = as.Date(date),
+    month = format(date, "%Y-%m"),
+    month_date = as.Date(paste0(month, "-01")),
+    content = tolower(subject),
+    content = gsub("[^a-z\\s]", " ", content)
+  )
+
+keywordsubjects_counts <- data.frame()
+for (word in tension_subjectskeywords) {
+  temp <- subject_time %>%
+    filter(grepl(paste0("\\b", word, "\\b"), content)) %>%
+    distinct(mid, month_date) %>%
+    group_by(month_date) %>%
+    summarise(n = n()) %>%
+    mutate(keyword = word)
+  keywordsubjects_counts <- bind_rows(keywordsubjects_counts, temp)
+}
+
+
+keywordsubjects_counts <- keywordsubjects_counts %>%
+  filter(!is.na(month_date), !is.na(n)) %>%
+  filter(month_date >= as.Date("1998-12-01") & month_date <= as.Date("2002-08-01"))
+
+events <- data.frame(
+  date = as.Date(c("2000-11-01", "2001-04-01", "2001-10-01", "2002-01-01")),
+  label = c("California Crisis", "New CEO", "SEC Investigation", "Enron Bankruptcy")
+)
+
+
+highlight_start <- as.Date("2001-10-01")
+highlight_end   <- as.Date("2002-01-01")
+
+
+
+
+ggplot(keywordsubjects_counts, aes(x = month_date, y = n)) +
+    geom_point(color = "red", alpha = 0.5, size = 0.8) +
+    geom_smooth(method = "loess", span = 0.2, se = FALSE, color = "blue", linewidth = 1) + geom_vline(data = events, aes(xintercept = date), color = "yellow", linetype = "dashed", linewidth = 1.2) +
+  geom_text_repel(data = events,
+                  aes(x = date - 15, y = 0, label = label),
+                  inherit.aes = FALSE,
+                  angle = 90, hjust = 2,
+                  direction = "y",
+                  nudge_x = -10,
+                  segment.color = NA,
+                  size = 3.5,
+                  fontface = "italic",
+                  color = "black") +
+    facet_wrap(~ keyword, scales = "free_y", ncol = 4) +
+    scale_x_date(
+        limits = as.Date(c("1998-12-01", "2002-08-01")),
+        date_labels = "%b\n%Y",
+        date_breaks = "6 months"
+    ) +
+    labs(
+        title = "Trend of Tension-Related Keywords in Emails",
+        subtitle = "Monthly frequency with LOESS smoothing",
+        x = NULL,
+        y = "Number of Mentions"
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 10, hjust = 0.5),
+        strip.text = element_text(size = 10, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.spacing = unit(0.8, "lines")
+    )
+
+
+
+```
+
+The graph shows a clear rise in mentions of sensitive keywords such as “credit”, “deal”, “market”, “risk” and “legal” in the run-up to major events (new CEO, SEC investigation, bankruptcy). There were three main peaks: after the California crisis, during the SEC investigation and just before the bankruptcy, reflecting an intensification of internal tensions. These trends confirm that the language of emails was closely following the deterioration of Enron's situation, and can serve as a precursor to a crisis.
+
+
+## 5.4 Monthly Trend of Content Keywords
+
+This code tracks the monthly use of sensitive keywords in the email content. It incorporates key events (California crisis, new CEO, SEC investigation, bankruptcy) to contextualize the variations observed. 
+
+```{r}
+reference_time <- referenceinfo %>% left_join(message %>% select(mid, date), by = "mid") %>% filter(!is.na(reference), !is.na(date)) %>% mutate(date = as.Date(date),month = format(date, "%Y-%m"),month_date = as.Date(paste0(month, "-01")),content = tolower(reference),content = gsub("[^a-z\\s]", " ", content))
+
+
+keywordcontent_counts <- data.frame()
+for (word in tension_contentkeywords) {
+temp <- reference_time %>%
+filter(grepl(paste0("\\b", word, "\\b"), content)) %>%
+distinct(mid, month_date) %>% 
+group_by(month_date) %>%
+summarise(n = n()) %>%
+mutate(keyword = word)
+keywordcontent_counts <- bind_rows(keywordcontent_counts, temp)
+}
+
+keywordcontent_counts <- keywordcontent_counts %>% filter(!is.na(month_date), !is.na(n)) %>% filter(month_date >= as.Date("1998-12-01") & month_date <= as.Date("2002-08-01"))
+events <- data.frame(
+  date = as.Date(c("2000-11-01", "2001-04-01", "2001-10-01", "2002-01-01")),
+  label = c("California Crisis", "New CEO", "SEC Investigation", "Enron Bankruptcy")
+)
+
+
+highlight_start <- as.Date("2001-10-01")
+highlight_end   <- as.Date("2002-01-01")
+
+
+ggplot(keywordcontent_counts, aes(x = month_date, y = n)) +
+    geom_point(color = "red", alpha = 0.5, size = 0.8) + geom_vline(data = events, aes(xintercept = date), color = "yellow", linetype = "dashed", linewidth = 1.2) +
+  geom_text_repel(data = events,
+                  aes(x = date - 15, y = 0, label = label),
+                  inherit.aes = FALSE,
+                  angle = 90, hjust = 2,
+                  direction = "y",
+                  nudge_x = -10,
+                  segment.color = NA,size = 3.5,
+                  fontface = "italic",
+                  color = "black") +
+    geom_smooth(method = "loess", span = 0.2, se = FALSE, color = "blue", linewidth = 1) +
+    facet_wrap(~ keyword, scales = "free_y", ncol = 4) +
+    scale_x_date(
+        limits = as.Date(c("1998-12-01", "2002-08-01")),
+        date_labels = "%b\n%Y",
+        date_breaks = "6 months"
+    ) +
+    labs(
+        title = "Trend of Tension-Related Keywords in Emails",
+        subtitle = "Monthly frequency with LOESS smoothing",
+        x = NULL,
+        y = "Number of Mentions"
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 10, hjust = 0.5),
+        strip.text = element_text(size = 10, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.spacing = unit(0.8, "lines")
+    )
+
+```
+Here, the graph shows a clear increase in mentions of sensitive keywords, mainly at the start of the SEC investigation.  The impact of the other three major events is less marked than in the previous graph, which focuses on keywords present in e-mail subject lines.
+
+
+# 6. Conclusion
+
+This analysis of Enron's messaging data has enabled us to better understand the dynamics of communication within the company during a critical period. We have identified the most influential employees, highlighted differences in behavior according to status, and observed the evolution of exchanges in relation to the major events of the scandal. The analysis of message content, although brief, opens up interesting avenues for future, more in-depth work, particularly in text mining. A particularly promising extension would be to study the emotions expressed by employees through the content of emails, in order to better understand the psychological impact of the crisis within the organization. The Shiny application we have developed enables these results to be explored interactively.
+
+
